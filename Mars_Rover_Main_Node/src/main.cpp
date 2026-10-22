@@ -1,4 +1,4 @@
-/* ESP32 TWAI receive example.
+  /*ESP32 TWAI receive example.
   Receive messages and sends them over serial.
 
   Connect a CAN bus transceiver to the RX/TX pins.
@@ -30,8 +30,8 @@
 #include "driver/twai.h"
 
 // Pins used to connect to CAN bus transceiver:
-#define RX_PIN 21
-#define TX_PIN 22
+#define RX_PIN 5
+#define TX_PIN 4
 
 // Interval:
 #define POLLING_RATE_MS 1000
@@ -41,6 +41,7 @@ static bool driver_installed = false;
 void setup() {
   // Start Serial:
   Serial.begin(115200);
+  delay(10000);
 
   // Initialize configuration structures using macro initializers
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_LISTEN_ONLY);
@@ -126,5 +127,8 @@ void loop() {
     while (twai_receive(&message, 0) == ESP_OK) {
       handle_rx_message(message);
     }
+  } else {
+    Serial.println("No message received");
+    delay(1000);
   }
 }
