@@ -12,22 +12,60 @@
 
 #include <Arduino.h>
 #include "driver/twai.h"
+#include <stdio.h>
 
 // Pins used to connect to CAN bus transceiver:
-#define RX_PIN 5
-#define TX_PIN 4
+#define RX_PIN 41
+#define TX_PIN 42
+
+//Pins for Potentiometers
+#define POT1_PIN 4
 
 // Interval:
 #define TRANSMIT_RATE_MS 1000
-
 #define POLLING_RATE_MS 1000
 
 static bool driver_installed = false;
 
 unsigned long previousMillis = 0;  // will store last time a message was send
 
+void can_monitor_task(void *arg)
+{
+    uint32_t alerts;
+    twai_status_info_t status;
+
+    twai_reconfigure_alerts(TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_OFF |
+                            TWAI_ALERT_BUS_RECOVERED | TWAI_ALERT_TX_FAILED,
+                            NULL);
+
+    for (;;) {
+        if (twai_read_alerts(&alerts, pdMS_TO_TICKS(1000)) == ESP_OK) {
+            if (alerts & TWAI_ALERT_ERR_PASS) {
+                printf("error passive\n");
+            }
+            if (alerts & TWAI_ALERT_BUS_OFF) {
+                printf("bus-off, starting recovery\n");
+                twai_initiate_recovery();
+            }
+            if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+                printf("recovered, restarting\n");
+                twai_start();
+            }
+        }
+
+        if (twai_get_status_info(&status) == ESP_OK) {
+            printf("state=%d tec=%lu rec=%lu bus_errors=%lu\n",
+                   (int)status.state,
+                   (unsigned long)status.tx_error_counter,
+                   (unsigned long)status.rx_error_counter,
+                   (unsigned long)status.bus_error_count);
+        }
+    }
+}
+
 void setup() {
   // Start Serial:
+
   pinMode(21, OUTPUT);
   digitalWrite(21, LOW);
   Serial.begin(115200);
@@ -52,6 +90,7 @@ void setup() {
     Serial.println("Failed to start driver");
     return;
   }
+  xTaskCreate(can_monitor_task, "can_mon", 4096, NULL, 5, NULL);
 
   // Reconfigure alerts to detect TX alerts and Bus-Off errors
   uint32_t alerts_to_enable = TWAI_ALERT_TX_IDLE | TWAI_ALERT_TX_SUCCESS | TWAI_ALERT_TX_FAILED | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR;
@@ -66,24 +105,36 @@ void setup() {
   driver_installed = true;
 }
 
-static void send_message() {
+esp_err_t send_message(uint32_t id, const uint8_t *buf, uint8_t len) {
   // Send message
 
-  // Configure message to transmit
-  twai_message_t message;
-  message.identifier = 0x0F6;
-  message.data_length_code = 4;
-  for (int i = 0; i < 4; i++) {
-    message.data[i] = 0;
+  if (len > 8) {
+    Serial.println("Yuck");
+    return ESP_ERR_INVALID_ARG;
   }
 
+  twai_message_t msg = {0};       // zeroes extd/rtr/ss flags too
+  msg.identifier = id;
+  msg.data_length_code = len;     // only these bytes go on the wire
+  memcpy(msg.data, buf, len);
+
   // Queue message for transmission
-  if (twai_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+  esp_err_t status = twai_transmit(&msg, pdMS_TO_TICKS(1000));
+  if(status == ESP_OK) {
     printf("Message queued for transmission\n");
+
+    //Test Outputs
+    uint16_t payload = (msg.data[0] << 8) | msg.data[1];
+    printf("Sending message with ID: 0x%X, Payload: %04X\n", msg.identifier, payload);
+    //
+
   } else {
     printf("Failed to queue message for transmission\n");
   }
+  return status;
 }
+
+
 
 void loop() {
   if (!driver_installed) {
@@ -116,11 +167,22 @@ void loop() {
     Serial.printf("TX buffered: %" PRIu32 "\t", twaistatus.msgs_to_tx);
   }
 
-  // Send message
+
+  uint16_t potValue = 0;
+  potValue = analogRead(POT1_PIN);
+  printf("Potentiometer Value: %d\n", potValue);
+  delay(1000);
+
+  
+  uint8_t payload[2];
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
     previousMillis = currentMillis;
-    send_message();
-    digitalWrite(21, HIGH);
+
+    payload[0] = (uint8_t)(potValue >> 8);  // high byte
+    payload[1] = (uint8_t)(potValue & 0xFF); // low byte
+  
+    send_message(0x0F6, payload, sizeof(payload));
   }
+  
 }

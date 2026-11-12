@@ -12,10 +12,18 @@
 
 #include <Arduino.h>
 #include "driver/twai.h"
+#include <stdio.h>
+
 
 // Pins used to connect to CAN bus transceiver:
-#define RX_PIN 5
-#define TX_PIN 4
+#define RX_PIN 41
+#define TX_PIN 42
+
+// Pins for potentiometers
+#define POT_PIN_1 4
+#define POT_PIN_2 5
+#define POT_PIN_3 6
+#define POT_PIN_4 7
 
 // Interval:
 #define TRANSMIT_RATE_MS 1000
@@ -26,12 +34,43 @@ static bool driver_installed = false;
 
 unsigned long previousMillis = 0;  // will store last time a message was send
 
+void can_monitor_task(void *arg)
+{
+    uint32_t alerts;
+    twai_status_info_t status;
+
+    twai_reconfigure_alerts(TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_OFF |TWAI_ALERT_BUS_RECOVERED | TWAI_ALERT_TX_FAILED, NULL);
+
+    for (;;) {
+        if (twai_read_alerts(&alerts, pdMS_TO_TICKS(1000)) == ESP_OK) {
+            if (alerts & TWAI_ALERT_ERR_PASS) {
+                printf("error passive\n");
+            }
+            if (alerts & TWAI_ALERT_BUS_OFF) {
+                printf("bus-off, starting recovery\n");
+                twai_initiate_recovery();
+            }
+            if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+                printf("recovered, restarting\n");
+                twai_start();
+            }
+        }
+
+        if (twai_get_status_info(&status) == ESP_OK) {
+            printf("state=%d tec=%lu rec=%lu bus_errors=%lu\n",
+                   (int)status.state,
+                   (unsigned long)status.tx_error_counter,
+                   (unsigned long)status.rx_error_counter,
+                   (unsigned long)status.bus_error_count);
+        }
+    }
+}
+
 void setup() {
   // Start Serial:
-  pinMode(21, OUTPUT);
-  digitalWrite(21, LOW);
   Serial.begin(115200);
   delay(10000);
+
   // Initialize configuration structures using macro initializers
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();  //Look in the api-reference for other speed sets.
@@ -52,6 +91,7 @@ void setup() {
     Serial.println("Failed to start driver");
     return;
   }
+  xTaskCreate(can_monitor_task, "can_mon", 4096, NULL, 5, NULL);
 
   // Reconfigure alerts to detect TX alerts and Bus-Off errors
   uint32_t alerts_to_enable = TWAI_ALERT_TX_IDLE | TWAI_ALERT_TX_SUCCESS | TWAI_ALERT_TX_FAILED | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR;
@@ -66,24 +106,42 @@ void setup() {
   driver_installed = true;
 }
 
-static void send_message() {
+esp_err_t send_message(uint32_t id, const uint8_t *buf, uint8_t len) {
   // Send message
 
-  // Configure message to transmit
-  twai_message_t message;
-  message.identifier = 0x0F6;
-  message.data_length_code = 4;
-  for (int i = 0; i < 4; i++) {
-    message.data[i] = 0;
+  if (len > 8) {
+    Serial.println("Yuck");
+    return ESP_ERR_INVALID_ARG;
   }
 
+  twai_message_t msg = {0};       // zeroes extd/rtr/ss flags too
+  msg.identifier = id;
+  msg.data_length_code = len;     // only these bytes go on the wire
+  memcpy(msg.data, buf, len);
+
   // Queue message for transmission
-  if (twai_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+  esp_err_t status = twai_transmit(&msg, pdMS_TO_TICKS(1000));
+  if(status == ESP_OK) {
     printf("Message queued for transmission\n");
+
+    //Test Outputs
+    uint16_t pot1_Payload = (msg.data[0] << 8) | msg.data[1];
+    uint16_t pot2_Payload = (msg.data[2] << 8) | msg.data[3];
+    uint16_t pot3_Payload = (msg.data[4] << 8) | msg.data[5];
+    uint16_t pot4_Payload = (msg.data[6] << 8) | msg.data[7];
+
+
+    printf("Sending message with ID: 0x%X\n Pot 1: %04X\n Pot 2: %04X\n Pot 3: %04X\n Pot 4: %04X\n", msg.identifier, 
+      pot1_Payload, pot2_Payload, pot3_Payload, pot4_Payload);
+    //
+
   } else {
     printf("Failed to queue message for transmission\n");
   }
+  return status;
 }
+
+
 
 void loop() {
   if (!driver_installed) {
@@ -116,11 +174,36 @@ void loop() {
     Serial.printf("TX buffered: %" PRIu32 "\t", twaistatus.msgs_to_tx);
   }
 
-  // Send message
+  // Read potentiometer values
+  uint16_t potValue_1 = 0;
+  uint16_t potValue_2 = 0;
+  uint16_t potValue_3 = 0;
+  uint16_t potValue_4 = 0;
+
+  potValue_1 = analogRead(POT_PIN_1);
+  potValue_2 = analogRead(POT_PIN_2);
+  potValue_3 = analogRead(POT_PIN_3);
+  potValue_4 = analogRead(POT_PIN_4);
+
+  printf("Potentiometer Values: %d, %d, %d, %d\n", potValue_1, potValue_2, potValue_3, potValue_4);
+  delay(1000);
+
+  
+  uint8_t payload[8];
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
     previousMillis = currentMillis;
-    send_message();
-    digitalWrite(21, HIGH);
+
+    payload[0] = (uint8_t)(potValue_1 >> 8);     //Pot 1 high byte
+    payload[1] = (uint8_t)(potValue_1 & 0xFF);   //Pot 1 low byte
+    payload[2] = (uint8_t)(potValue_2 >> 8);     //Pot 2 high byte
+    payload[3] = (uint8_t)(potValue_2 & 0xFF);   //Pot 2 low byte
+    payload[4] = (uint8_t)(potValue_3 >> 8);     //Pot 3 high byte
+    payload[5] = (uint8_t)(potValue_3 & 0xFF);   //Pot 3 low byte
+    payload[6] = (uint8_t)(potValue_4 >> 8);     //Pot 4 high byte
+    payload[7] = (uint8_t)(potValue_4 & 0xFF);   //Pot 4 low byte
+
+    send_message(0x0F6, payload, sizeof(payload));
   }
+  
 }

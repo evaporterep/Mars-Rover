@@ -30,8 +30,8 @@
 #include "driver/twai.h"
 
 // Pins used to connect to CAN bus transceiver:
-#define RX_PIN 5
-#define TX_PIN 4
+#define RX_PIN 0
+#define TX_PIN 1
 
 // Interval:
 #define POLLING_RATE_MS 1000
@@ -44,7 +44,7 @@ void setup() {
   delay(10000);
 
   // Initialize configuration structures using macro initializers
-  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_LISTEN_ONLY);
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();  //Look in the api-reference for other speed sets.
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
